@@ -1,0 +1,14 @@
+# Data files — too large for git
+raw/
+master.csv
+scraper.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# Env / secrets
+.env
+*.token
