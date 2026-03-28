@@ -1,17 +1,21 @@
 """
-screener.py — Pre-Rocket Pattern Daily Screener
-================================================
-Scans all IDX stocks for the two conditions statistically shown to
-precede a rocket (50%+ gain in 20 days):
+screener.py — Pre-Rocket Pattern Daily Screener  (v2)
+======================================================
+Rebuilt after back-analysis of historical accuracy showed original signals
+(range compression + flat price) were HURTING performance — STRONG tier
+underperformed RADAR tier, meaning the extra filters discarded winners.
 
-  Signal 1 — Volume accumulation  : 10-day avg volume > 1.5x prior 30-day baseline
-  Signal 2 — Range compression    : 10-day avg daily range % < prior 30-day baseline
-  Signal 3 — Price NOT already up : 10-day price trend flat or slightly down
+New signals (replacing range compression & flat price):
+  Signal 1 — Volume surge       : 10-day avg volume > 1.5x prior 30-day baseline
+  Signal 2 — Up-day volume bias : volume on up-days / volume on down-days > 1.5
+                                   distinguishes accumulation from distribution
+  Signal 3 — Price above MA20   : closing price above 20-day moving average
+  Signal 4 — Breakout proximity : close within 8% of 20-day high (coiling near resistance)
 
 Each stock gets a SCORE 0–100 and an ALERT level:
-  🔴  STRONG  — all 3 signals active, high confidence
-  🟡  WATCH   — 2 signals active
-  ⚪  RADAR   — 1 signal (volume spike only)
+  🔴  STRONG  — vol spike + 2 of (up-bias, above-MA20, near-breakout)
+  🟡  WATCH   — vol spike + 1 of the above
+  ⚪  RADAR   — vol spike only
 
 Run:
     python screener.py               # screen as of latest date in master.csv
@@ -35,14 +39,14 @@ MASTER_CSV  = os.path.join(BASE_DIR, "master.csv")
 SCREENS_DIR = os.path.join(BASE_DIR, "screens")
 os.makedirs(SCREENS_DIR, exist_ok=True)
 
-# ── Thresholds (tuned from back-analysis) ────────────────────────────────────
-MIN_BASE_PRICE     = 100       # IDR — ignore penny stocks
-MIN_BASELINE_NILAI = 500_000_000  # avg 500M/day value to ensure liquidity
-BASELINE_DAYS      = 30        # days used to compute "normal" metrics
-SIGNAL_WINDOW      = 10        # days we measure for signals
-VOL_SPIKE_STRONG   = 2.0       # volume ratio for strong signal
-VOL_SPIKE_MILD     = 1.5       # volume ratio for mild signal
-RANGE_COMPRESS_PCT = 0.90      # pre-window range must be < 90% of baseline range
+# ── Thresholds ────────────────────────────────────────────────────────────────
+MIN_BASE_PRICE     = 100           # IDR — ignore penny stocks
+MIN_BASELINE_NILAI = 500_000_000   # avg 500M/day value to ensure liquidity
+BASELINE_DAYS      = 30            # days used to compute "normal" metrics
+SIGNAL_WINDOW      = 10            # days we measure for signals
+VOL_SPIKE_THRESH   = 1.5           # minimum volume ratio (mandatory gate)
+UP_BIAS_STRONG     = 1.5           # up-vol / down-vol for accumulation signal
+BREAK_PROX_THRESH  = 0.92          # close / 20d-high for near-breakout signal
 
 
 def load_master() -> pd.DataFrame:
@@ -62,137 +66,97 @@ def load_master() -> pd.DataFrame:
 
 def score_stock(grp: pd.DataFrame, as_of_pos: int):
     """
-    Compute screener signals for one stock up to position `as_of_pos`.
+    Compute screener v2 signals for one stock up to position `as_of_pos`.
     Returns a result dict or None if the stock doesn't qualify.
+
+    New signals: up-day volume bias, price vs MA20, breakout proximity.
+    Removed: range compression, flat-price filter (showed negative predictive value).
     """
-    total_needed = BASELINE_DAYS + SIGNAL_WINDOW + 5   # buffer
+    total_needed = BASELINE_DAYS + SIGNAL_WINDOW + 5
     if as_of_pos < total_needed:
         return None
 
-    # Slice windows
     baseline = grp.iloc[as_of_pos - BASELINE_DAYS - SIGNAL_WINDOW : as_of_pos - SIGNAL_WINDOW]
     signal   = grp.iloc[as_of_pos - SIGNAL_WINDOW : as_of_pos]
-    latest   = grp.iloc[as_of_pos - 1]  # most recent day
+    latest   = grp.iloc[as_of_pos - 1]
 
     if len(baseline) < 20 or len(signal) < 7:
         return None
 
-    # Liquidity gate
+    # ── Gates ─────────────────────────────────────────────────────────────────
     if baseline["Nilai"].mean() < MIN_BASELINE_NILAI:
         return None
     if latest["Penutupan"] < MIN_BASE_PRICE:
         return None
-    # Must have traded recently
     if signal["Volume"].sum() == 0:
         return None
 
-    # ── Signal 1: Volume accumulation ────────────────────────────────────────
     b_vol = baseline["Volume"].mean()
     s_vol = signal["Volume"].mean()
     vol_ratio = s_vol / b_vol if b_vol > 0 else 0
+    if vol_ratio < VOL_SPIKE_THRESH:
+        return None
 
-    # ── Signal 2: Range compression ──────────────────────────────────────────
-    baseline["range_pct"] = (
-        (baseline["Tertinggi"] - baseline["Terendah"])
-        / baseline["Sebelumnya"].replace(0, np.nan)
-        * 100
-    )
-    signal["range_pct"] = (
-        (signal["Tertinggi"] - signal["Terendah"])
-        / signal["Sebelumnya"].replace(0, np.nan)
-        * 100
-    )
-    b_range = baseline["range_pct"].mean()
-    s_range = signal["range_pct"].mean()
-    range_ratio = s_range / b_range if b_range > 0 else 1
-
-    # ── Signal 3: Price trend — flat or slightly down ────────────────────────
-    x = np.arange(len(signal))
-    slope = np.polyfit(x, signal["Penutupan"].values, 1)[0]
-    price_trend_pct_per_day = slope / signal["Penutupan"].mean() * 100
-
-    # 10-day cumulative price change
+    # Corporate action / suspension filter
     first_close = signal.iloc[0]["Sebelumnya"]
     last_close  = signal.iloc[-1]["Penutupan"]
     price_chg_10d = (last_close - first_close) / first_close * 100 if first_close > 0 else 0
+    if price_chg_10d < -30:
+        return None
 
-    # ── Frequency trend ───────────────────────────────────────────────────────
     b_freq = baseline["Frekuensi"].mean()
     s_freq = signal["Frekuensi"].mean()
     freq_ratio = s_freq / b_freq if b_freq > 0 else 0
 
-    # ── Foreign flow ─────────────────────────────────────────────────────────
     net_foreign_signal = signal["Net Foreign"].sum()
-    net_foreign_days   = (signal["Net Foreign"] > 0).sum()
 
-    # ── Scoring (0–100) ──────────────────────────────────────────────────────
+    # ── Signal 1: Up-day volume bias (accumulation vs distribution) ───────────
+    up_mask  = signal["Penutupan"] >= signal["Sebelumnya"]
+    up_vol   = signal.loc[ up_mask, "Volume"].sum()
+    down_vol = signal.loc[~up_mask, "Volume"].sum()
+    up_bias  = up_vol / down_vol if down_vol > 0 else 5.0
+
+    # ── Signal 2: Price above 20-day MA (trend alignment) ─────────────────────
+    ma20_window = grp.iloc[max(0, as_of_pos - 20) : as_of_pos]
+    ma20        = ma20_window["Penutupan"].mean()
+    above_ma20  = bool(latest["Penutupan"] > ma20)
+
+    # ── Signal 3: Breakout proximity (coiling near resistance) ────────────────
+    high_20d   = ma20_window["Tertinggi"].max()
+    break_prox = latest["Penutupan"] / high_20d if high_20d > 0 else 0
+    near_break = break_prox >= BREAK_PROX_THRESH
+
+    # ── Scoring (0–100) ───────────────────────────────────────────────────────
     score = 0
-
-    # Volume component (0–40 pts)
-    if vol_ratio >= VOL_SPIKE_STRONG:
-        score += 40
-    elif vol_ratio >= VOL_SPIKE_MILD:
-        score += 25
-    elif vol_ratio >= 1.2:
-        score += 10
-
-    # Range compression (0–35 pts)
-    if range_ratio < 0.70:
-        score += 35
-    elif range_ratio < RANGE_COMPRESS_PCT:
-        score += 20
-    elif range_ratio < 1.0:
-        score += 8
-
-    # Discard stocks with extreme price moves (corporate actions / suspensions)
-    if price_chg_10d < -30 or range_ratio < 0:
-        return None
-
-    # Price not already running (0–15 pts)
-    # Best: flat to slightly down (-5% to +5%). Penalise if already up big.
-    if -5 <= price_chg_10d <= 5:
-        score += 15
-    elif -10 <= price_chg_10d <= 10:
-        score += 8
-    elif price_chg_10d > 20:
-        score -= 10   # Already running — lower priority
-
-    # Frequency uptick bonus (0–10 pts)
-    if freq_ratio >= 1.5:
-        score += 10
-    elif freq_ratio >= 1.2:
-        score += 5
-
+    score += 35 if vol_ratio >= 2.5 else 25 if vol_ratio >= 2.0 else 15   # vol (15-35)
+    score += 30 if up_bias >= 3.0 else 20 if up_bias >= 2.0 else 12 if up_bias >= UP_BIAS_STRONG else 5 if up_bias >= 1.0 else 0
+    score += 15 if above_ma20 else 0
+    score += 12 if break_prox >= 0.95 else 8 if near_break else 3 if break_prox >= 0.85 else 0
+    score += 8 if freq_ratio >= 1.5 else 4 if freq_ratio >= 1.2 else 0
     score = max(0, min(100, score))
 
     # ── Alert level ───────────────────────────────────────────────────────────
-    has_vol    = vol_ratio >= VOL_SPIKE_MILD       # mandatory
-    has_range  = range_ratio < RANGE_COMPRESS_PCT
-    has_flat   = -10 <= price_chg_10d <= 10
-
-    # Volume is mandatory — no volume spike = not interesting
-    if not has_vol:
-        return None
-
-    secondary = sum([has_range, has_flat])
-    if secondary == 2:
+    secondary = sum([up_bias >= UP_BIAS_STRONG, above_ma20, near_break])
+    if secondary >= 2:
         alert = "STRONG"
-    elif secondary == 1:
+    elif secondary >= 1:
         alert = "WATCH"
     else:
         alert = "RADAR"
 
     return {
-        "Kode Saham":     latest["Kode Saham"],
+        "Kode Saham":      latest["Kode Saham"],
         "Nama Perusahaan": latest["Nama Perusahaan"],
-        "Score":          score,
-        "Alert":          alert,
-        "Close":          int(latest["Penutupan"]),
-        "Vol Ratio":      round(vol_ratio, 2),
-        "Range Ratio":    round(range_ratio, 2),
-        "10d Chg%":       round(price_chg_10d, 1),
-        "Freq Ratio":     round(freq_ratio, 2),
-        "Net Fgn (B)":    round(net_foreign_signal / 1e9, 2),
+        "Score":           score,
+        "Alert":           alert,
+        "Close":           int(latest["Penutupan"]),
+        "Vol Ratio":       round(vol_ratio, 2),
+        "Up-Vol Bias":     round(up_bias, 2),
+        "Above MA20":      above_ma20,
+        "Brk Prox%":       round(break_prox * 100, 1),
+        "10d Chg%":        round(price_chg_10d, 1),
+        "Freq Ratio":      round(freq_ratio, 2),
+        "Net Fgn (B)":     round(net_foreign_signal / 1e9, 2),
         "Avg Val/day (B)": round(baseline["Nilai"].mean() / 1e9, 2),
     }
 
@@ -246,14 +210,15 @@ def run_screener(as_of_date: str = None, top_n: int = 20, min_score: int = 0) ->
         if section_df.empty:
             return
         print(f"\n  {emoji} {label} ({len(section_df)} stocks)  — showing top {min(n, len(section_df))}")
-        print(f"  {'Ticker':<8} {'Score':>5} {'Close':>7} {'Vol Ratio':>9} {'RangeRatio':>10} {'10d Chg%':>9} {'FreqRatio':>9} {'NetFgn(B)':>10}  Company")
-        print(f"  {'-'*105}")
+        print(f"  {'Ticker':<8} {'Score':>5} {'Close':>7} {'VolRatio':>8} {'UpBias':>7} {'AbvMA20':>7} {'BrkPrx%':>8} {'10dChg%':>8} {'FreqR':>6} {'NetFgn(B)':>9}  Company")
+        print(f"  {'-'*110}")
         for _, r in section_df.head(n).iterrows():
+            ma_flag = "YES" if r.get("Above MA20", False) else "no"
             print(
                 f"  {r['Kode Saham']:<8} {r['Score']:>5} {r['Close']:>7,} "
-                f"{r['Vol Ratio']:>9.2f} {r['Range Ratio']:>10.2f} "
-                f"{r['10d Chg%']:>8.1f}% {r['Freq Ratio']:>9.2f} "
-                f"{r['Net Fgn (B)']:>10.2f}  {r['Nama Perusahaan'][:35]}"
+                f"{r['Vol Ratio']:>8.2f} {r['Up-Vol Bias']:>7.2f} {ma_flag:>7} "
+                f"{r['Brk Prox%']:>7.1f}% {r['10d Chg%']:>7.1f}% "
+                f"{r['Freq Ratio']:>6.2f} {r['Net Fgn (B)']:>9.2f}  {r['Nama Perusahaan'][:35]}"
             )
 
     show_n = max(top_n // 3, 5)

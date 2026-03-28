@@ -56,7 +56,10 @@ def get_trading_days():
     df = load_data()
     return sorted(df["DATE"].unique(), reverse=True)
 
-# ── Screener logic (reused from screener.py) ──────────────────────────────────
+# ── Screener logic v2 ─────────────────────────────────────────────────────────
+# Rebuilt after back-analysis showed old signals (range compression + flat price)
+# were HURTING performance (STRONG < WATCH < RADAR).
+# New core signals: up-day volume bias, price vs MA20, breakout proximity.
 def run_screener(df, as_of_date):
     BASELINE = 30; SIGNAL = 10
     MIN_PRICE = 100; MIN_NILAI = 500_000_000; VOL_THRESH = 1.5
@@ -69,49 +72,222 @@ def run_screener(df, as_of_date):
         base = g.iloc[-(BASELINE+SIGNAL):-SIGNAL].copy()
         sig  = g.iloc[-SIGNAL:].copy()
         lat  = g.iloc[-1]
+
+        # ── Gates ─────────────────────────────────────────────────────────────
         if base["Nilai"].mean() < MIN_NILAI: continue
         if lat["Penutupan"] < MIN_PRICE: continue
         if sig["Volume"].sum() == 0: continue
-        b_vol  = base["Volume"].mean();  s_vol  = sig["Volume"].mean()
-        b_val  = base["Nilai"].mean();   s_val  = sig["Nilai"].mean()
+
+        b_vol  = base["Volume"].mean(); s_vol  = sig["Volume"].mean()
+        b_val  = base["Nilai"].mean()
         b_freq = base["Frekuensi"].mean(); s_freq = sig["Frekuensi"].mean()
-        vr = s_vol/b_vol if b_vol>0 else 0
+        vr    = s_vol / b_vol if b_vol > 0 else 0
+        freqr = s_freq / b_freq if b_freq > 0 else 0
         if vr < VOL_THRESH: continue
-        valr = s_val/b_val if b_val>0 else 0
-        freqr = s_freq/b_freq if b_freq>0 else 0
-        base["rng"] = (base["Tertinggi"]-base["Terendah"])/base["Sebelumnya"].replace(0,np.nan)*100
-        sig["rng"]  = (sig["Tertinggi"] -sig["Terendah"]) /sig["Sebelumnya"].replace(0,np.nan)*100
-        rr = sig["rng"].mean()/base["rng"].mean() if base["rng"].mean()>0 else 1
-        if rr < 0: continue
-        f = sig.iloc[0]["Sebelumnya"]; l = sig.iloc[-1]["Penutupan"]
-        pc = (l-f)/f*100 if f>0 else 0
+
+        # Corporate action filter
+        f  = sig.iloc[0]["Sebelumnya"]; l = sig.iloc[-1]["Penutupan"]
+        pc = (l - f) / f * 100 if f > 0 else 0
         if pc < -30: continue
+
         nf = sig["Net Foreign"].sum()
+
+        # ── Signal 1: Up-day volume bias (buying vs selling pressure) ─────────
+        # Distinguishes accumulation from distribution — the key missing signal.
+        up_mask  = sig["Penutupan"] >= sig["Sebelumnya"]
+        up_vol   = sig.loc[ up_mask, "Volume"].sum()
+        down_vol = sig.loc[~up_mask, "Volume"].sum()
+        up_bias  = up_vol / down_vol if down_vol > 0 else 5.0
+
+        # ── Signal 2: Price vs 20-day MA (trend alignment) ────────────────────
+        ma20       = g.tail(20)["Penutupan"].mean()
+        above_ma20 = bool(lat["Penutupan"] > ma20)
+
+        # ── Signal 3: Breakout proximity (coiling near resistance) ────────────
+        high_20d   = g.tail(20)["Tertinggi"].max()
+        break_prox = lat["Penutupan"] / high_20d if high_20d > 0 else 0
+        near_break = break_prox >= 0.92
+
+        # ── Scoring (0–100) ───────────────────────────────────────────────────
         sc = 0
-        sc += 40 if vr>=2 else 28 if vr>=1.5 else 15
-        sc += 35 if rr<0.7 else 22 if rr<0.9 else 10 if rr<1.0 else 0
-        sc += 15 if -5<=pc<=5 else 8 if -15<=pc<=15 else -8 if pc>20 else 0
-        sc += 10 if freqr>=1.5 else 5 if freqr>=1.2 else 0
-        sc += 5 if valr>=1.5 else 0
+        sc += 35 if vr >= 2.5 else 25 if vr >= 2.0 else 15  # vol surge (15-35)
+        sc += 30 if up_bias >= 3.0 else 20 if up_bias >= 2.0 else 12 if up_bias >= 1.5 else 5 if up_bias >= 1.0 else 0
+        sc += 15 if above_ma20 else 0
+        sc += 12 if break_prox >= 0.95 else 8 if near_break else 3 if break_prox >= 0.85 else 0
+        sc += 8 if freqr >= 1.5 else 4 if freqr >= 1.2 else 0
         sc = max(0, min(100, sc))
-        has_range = rr < 0.90; has_flat = -10<=pc<=10
-        secondary = sum([has_range, has_flat])
-        alert = "🔴 STRONG" if secondary==2 else "🟡 WATCH" if secondary==1 else "⚪ RADAR"
+
+        # ── Alert tier ────────────────────────────────────────────────────────
+        secondary = sum([up_bias >= 1.5, above_ma20, near_break])
+        alert = "🔴 STRONG" if secondary >= 2 else "🟡 WATCH" if secondary >= 1 else "⚪ RADAR"
+
+        # ── Why ───────────────────────────────────────────────────────────────
+        reasons = [f"Vol {vr:.1f}x surge" if vr >= 2.0 else f"Vol {vr:.1f}x rising"]
+        if up_bias >= 3.0:   reasons.append(f"Strong buying ({up_bias:.1f}x up-vol)")
+        elif up_bias >= 1.5: reasons.append(f"Buying pressure ({up_bias:.1f}x)")
+        elif up_bias < 1.0:  reasons.append("Selling pressure (caution)")
+        if above_ma20:       reasons.append("Above MA20")
+        else:                reasons.append("Below MA20")
+        if near_break:       reasons.append(f"Near breakout ({break_prox*100:.0f}% of high)")
+        if freqr >= 1.5:     reasons.append("Freq surge")
+        if nf > 1e9:         reasons.append("Foreign buying")
+        elif nf < -1e9:      reasons.append("Foreign selling")
+
         results.append({
             "Ticker": ticker, "Company": str(lat["Nama Perusahaan"])[:35],
             "Alert": alert, "Score": sc,
+            "Why": " | ".join(reasons),
             "Close": int(lat["Penutupan"]),
-            "Vol Ratio": round(vr,2), "Range Ratio": round(rr,2),
-            "10d Chg%": round(pc,1), "Freq Ratio": round(freqr,2),
-            "Net Fgn (B)": round(nf/1e9,2),
-            "Avg Val/day (B)": round(b_val/1e9,2),
+            "Vol Ratio":   round(vr, 2),
+            "Up-Vol Bias": round(up_bias, 2),
+            "MA20":        round(ma20, 0),
+            "Brk Prox%":   round(break_prox * 100, 1),
+            "10d Chg%":    round(pc, 1),
+            "Freq Ratio":  round(freqr, 2),
+            "Net Fgn (B)": round(nf / 1e9, 2),
+            "Avg Val/day (B)": round(b_val / 1e9, 2),
         })
     if not results:
         return pd.DataFrame()
     out = pd.DataFrame(results)
-    order = {"🔴 STRONG":0,"🟡 WATCH":1,"⚪ RADAR":2}
+    order = {"🔴 STRONG": 0, "🟡 WATCH": 1, "⚪ RADAR": 2}
     out["_ord"] = out["Alert"].map(order)
-    return out.sort_values(["_ord","Score"], ascending=[True,False]).drop(columns="_ord").reset_index(drop=True)
+    return out.sort_values(["_ord", "Score"], ascending=[True, False]).drop(columns="_ord").reset_index(drop=True)
+
+
+def compute_forward_returns(df, tickers, screen_date):
+    """Return a DataFrame with +1d, +7d, +30d and 'now' returns for each ticker."""
+    all_dates = sorted(df["DATE"].unique())
+    cutoff = pd.to_datetime(screen_date)
+    # Find index of screen_date (or last date <= cutoff)
+    idx = max((i for i, d in enumerate(all_dates) if d <= cutoff), default=None)
+    if idx is None:
+        return pd.DataFrame()
+
+    price_pivot = df.pivot_table(index="DATE", columns="Kode Saham", values="Penutupan")
+    latest_date = all_dates[-1]
+
+    rows = []
+    for ticker in tickers:
+        if ticker not in price_pivot.columns:
+            continue
+        entry = price_pivot[ticker].iloc[idx] if idx < len(price_pivot) else None
+        if not entry or pd.isna(entry) or entry <= 0:
+            continue
+
+        def fwd_ret(offset):
+            fi = idx + offset
+            if fi >= len(all_dates):
+                return None
+            p = price_pivot[ticker].get(all_dates[fi])
+            if p is None or pd.isna(p) or p <= 0:
+                return None
+            return round((p - entry) / entry * 100, 1)
+
+        now_p = price_pivot[ticker].get(latest_date)
+        now_ret = round((now_p - entry) / entry * 100, 1) if (now_p and not pd.isna(now_p) and entry > 0) else None
+
+        rows.append({
+            "Ticker": ticker,
+            "Entry Close": int(entry),
+            "+1d %":  fwd_ret(1),
+            "+7d %":  fwd_ret(7),
+            "+30d %": fwd_ret(30),
+            "Now %":  now_ret if latest_date != all_dates[idx] else None,
+        })
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
+@st.cache_data(ttl=3600)
+def get_screener_accuracy_trend(_df):
+    """
+    Sample every 5 trading days, run the screener, record +30d return per pick.
+    Returns a long-form DataFrame: date | Alert | ret_30d
+    Cached for 1 hour — first run takes ~30s.
+    """
+    all_dates = sorted(_df["DATE"].unique())
+    min_idx  = 45                    # need enough history for screener
+    max_idx  = len(all_dates) - 31   # need 30 future days for returns
+    if max_idx <= min_idx:
+        return pd.DataFrame()
+
+    price_pivot = _df.pivot_table(index="DATE", columns="Kode Saham", values="Penutupan")
+
+    rows = []
+    for i in range(min_idx, max_idx, 5):   # ~weekly sample
+        screen_date = all_dates[i]
+        res = run_screener(_df, screen_date)
+        if res.empty:
+            continue
+        for _, rec in res.iterrows():
+            t = rec["Ticker"]
+            if t not in price_pivot.columns:
+                continue
+            entry = price_pivot[t].get(all_dates[i])
+            if not entry or pd.isna(entry) or entry <= 0:
+                continue
+            fp = price_pivot[t].get(all_dates[i + 30])
+            if fp is None or pd.isna(fp) or fp <= 0:
+                continue
+            rows.append({
+                "date":    pd.Timestamp(screen_date),
+                "Alert":   rec["Alert"],
+                "ret_30d": round((fp - entry) / entry * 100, 2),
+            })
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
+@st.cache_data(ttl=3600)
+def get_ticker_flags(_df, ticker):
+    """
+    Find every date where the screener (v2) would have flagged this ticker.
+    Uses same signal logic as run_screener — up-vol bias, MA20, breakout prox.
+    """
+    BASELINE = 30; SIGNAL = 10
+    MIN_PRICE = 100; MIN_NILAI = 500_000_000; VOL_THRESH = 1.5
+
+    g = _df[_df["Kode Saham"] == ticker].copy()
+    g = g[g["Penutupan"] > 0].sort_values("DATE").reset_index(drop=True)
+
+    flags = []
+    for pos in range(BASELINE + SIGNAL + 5, len(g) + 1):
+        base = g.iloc[pos - BASELINE - SIGNAL : pos - SIGNAL].copy()
+        sig  = g.iloc[pos - SIGNAL : pos].copy()
+        lat  = g.iloc[pos - 1]
+
+        if len(base) < 20 or len(sig) < 7:   continue
+        if base["Nilai"].mean() < MIN_NILAI:  continue
+        if lat["Penutupan"] < MIN_PRICE:      continue
+        if sig["Volume"].sum() == 0:          continue
+
+        b_vol = base["Volume"].mean(); s_vol = sig["Volume"].mean()
+        vr = s_vol / b_vol if b_vol > 0 else 0
+        if vr < VOL_THRESH:                   continue
+
+        f  = sig.iloc[0]["Sebelumnya"]; l = sig.iloc[-1]["Penutupan"]
+        pc = (l - f) / f * 100 if f > 0 else 0
+        if pc < -30:                          continue
+
+        up_mask  = sig["Penutupan"] >= sig["Sebelumnya"]
+        up_vol   = sig.loc[ up_mask, "Volume"].sum()
+        down_vol = sig.loc[~up_mask, "Volume"].sum()
+        up_bias  = up_vol / down_vol if down_vol > 0 else 5.0
+
+        ma20       = g.iloc[max(0, pos - 20):pos]["Penutupan"].mean()
+        above_ma20 = bool(lat["Penutupan"] > ma20)
+
+        high_20d   = g.iloc[max(0, pos - 20):pos]["Tertinggi"].max()
+        break_prox = lat["Penutupan"] / high_20d if high_20d > 0 else 0
+        near_break = break_prox >= 0.92
+
+        secondary = sum([up_bias >= 1.5, above_ma20, near_break])
+        alert = "🔴 STRONG" if secondary >= 2 else "🟡 WATCH" if secondary >= 1 else "⚪ RADAR"
+
+        flags.append({"DATE": lat["DATE"], "Alert": alert,
+                      "Close": lat["Penutupan"], "Vol Ratio": round(vr, 2),
+                      "Up-Vol Bias": round(up_bias, 2)})
+
+    return pd.DataFrame(flags) if flags else pd.DataFrame()
 
 
 # ── Sidebar nav ───────────────────────────────────────────────────────────────
@@ -287,26 +463,37 @@ elif page == "🔍 Screener":
 
     st.markdown("---")
 
+    def color_score(val):
+        if val >= 70: return "background-color: #b71c1c; color: white"
+        if val >= 50: return "background-color: #e53935; color: white"
+        if val >= 30: return "background-color: #ef9a9a"
+        return ""
+
+    # Columns to show in each section
+    display_cols = ["Ticker", "Company", "Score", "Why", "Close",
+                    "Vol Ratio", "Up-Vol Bias", "MA20", "Brk Prox%",
+                    "10d Chg%", "Freq Ratio", "Net Fgn (B)", "Avg Val/day (B)"]
+
     if not strong.empty:
         st.subheader("🔴 STRONG — All 3 signals active")
+        show_cols = [c for c in display_cols if c in strong.columns]
         st.dataframe(
-            strong.drop(columns=["Alert"]).style
-                .background_gradient(subset=["Score"], cmap="Reds")
-                .background_gradient(subset=["Vol Ratio"], cmap="Oranges"),
+            strong[show_cols].style.map(color_score, subset=["Score"]),
             use_container_width=True, hide_index=True,
         )
 
     if not watch.empty:
         st.subheader("🟡 WATCH — 2 signals active")
+        show_cols = [c for c in display_cols if c in watch.columns]
         st.dataframe(
-            watch.drop(columns=["Alert"]).style
-                .background_gradient(subset=["Score"], cmap="YlOrBr"),
+            watch[show_cols].style.map(color_score, subset=["Score"]),
             use_container_width=True, hide_index=True,
         )
 
     if not radar.empty:
         with st.expander(f"⚪ RADAR — Volume spike only ({len(radar)} stocks)"):
-            st.dataframe(radar.drop(columns=["Alert"]), use_container_width=True, hide_index=True)
+            show_cols = [c for c in display_cols if c in radar.columns]
+            st.dataframe(radar[show_cols], use_container_width=True, hide_index=True)
 
     # Score distribution
     st.markdown("---")
@@ -316,6 +503,159 @@ elif page == "🔍 Screener":
                        labels={"Score":"Composite Score","count":"# Stocks"})
     fig.update_layout(height=300, margin=dict(t=40,b=10))
     st.plotly_chart(fig, use_container_width=True)
+
+    # ── Forward Returns ────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📊 Recommendation Returns")
+    st.caption("How these picks actually performed after the screen date. "
+               "'Now %' = return from entry close to the latest available date.")
+
+    fwd = compute_forward_returns(df, results["Ticker"].tolist(), screen_date)
+
+    if fwd.empty:
+        st.info("Forward return data not available (need data after the screen date).")
+    else:
+        # Merge with alert/score/why for context
+        meta = results[["Ticker","Alert","Score","Why"]].copy()
+        fwd = fwd.merge(meta, on="Ticker", how="left")
+        col_order = ["Ticker","Alert","Score","Why","Entry Close","+1d %","+7d %","+30d %","Now %"]
+        fwd = fwd[[c for c in col_order if c in fwd.columns]]
+
+        def color_ret(val):
+            if not isinstance(val, (int, float)) or pd.isna(val):
+                return "color: #888"
+            if val > 10:  return "background-color: #1b5e20; color: white; font-weight: bold"
+            if val > 0:   return "color: #00c853; font-weight: bold"
+            if val < -10: return "background-color: #b71c1c; color: white; font-weight: bold"
+            if val < 0:   return "color: #ff1744; font-weight: bold"
+            return ""
+
+        ret_cols = [c for c in ["+1d %","+7d %","+30d %","Now %"] if c in fwd.columns]
+
+        st.dataframe(
+            fwd.style
+               .map(color_score, subset=["Score"])
+               .map(color_ret,   subset=ret_cols),
+            use_container_width=True, hide_index=True,
+        )
+
+        # Summary stats by alert tier
+        tiers = [
+            ("🔴 STRONG", "🔴 STRONG"),
+            ("🟡 WATCH",  "🟡 WATCH"),
+            ("⚪ RADAR",  "⚪ RADAR"),
+        ]
+        st.markdown("**Win rate by signal tier** (% picks with positive return)")
+        for tier_label, tier_key in tiers:
+            tier_fwd = fwd[fwd["Alert"] == tier_key] if "Alert" in fwd.columns else pd.DataFrame()
+            if tier_fwd.empty:
+                continue
+            st.markdown(f"**{tier_label}** — {len(tier_fwd)} stock(s)")
+            cols = st.columns(len(ret_cols))
+            for col_w, rc in zip(cols, ret_cols):
+                series = tier_fwd[rc].dropna()
+                if len(series) == 0:
+                    col_w.metric(rc, "—", delta="no data")
+                    continue
+                win_rate = (series > 0).sum() / len(series) * 100
+                avg_ret  = series.mean()
+                col_w.metric(
+                    rc,
+                    f"{win_rate:.0f}% wins ({len(series)})",
+                    delta=f"avg {avg_ret:+.1f}%",
+                    delta_color="normal" if avg_ret >= 0 else "inverse",
+                )
+
+    # ── Screener Accuracy Over Time ────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📈 Screener Accuracy Over Time")
+    st.caption("Win rate and average +30d return per signal tier, sampled weekly across all history. "
+               "Computed once and cached — first load takes ~30s.")
+
+    with st.spinner("Computing screener accuracy history (cached after first run)..."):
+        trend = get_screener_accuracy_trend(df)
+
+    if trend.empty:
+        st.info("Not enough data to compute accuracy trend (need at least 75 trading days).")
+    else:
+        # Aggregate: per date+alert → win rate & avg return
+        agg = (
+            trend.groupby(["date", "Alert"])
+            .agg(
+                win_rate=("ret_30d", lambda x: (x > 0).mean() * 100),
+                avg_ret =("ret_30d", "mean"),
+                n_picks =("ret_30d", "count"),
+            )
+            .reset_index()
+        )
+        # Rolling 3-period smooth per tier
+        smoothed = []
+        for alert_tier, grp in agg.groupby("Alert"):
+            grp = grp.sort_values("date").copy()
+            grp["win_rate_smooth"] = grp["win_rate"].rolling(3, min_periods=1).mean()
+            grp["avg_ret_smooth"]  = grp["avg_ret"].rolling(3, min_periods=1).mean()
+            smoothed.append(grp)
+        agg = pd.concat(smoothed).reset_index(drop=True)
+
+        color_map = {"🔴 STRONG": "#e53935", "🟡 WATCH": "#ffc107", "⚪ RADAR": "#90a4ae"}
+
+        tab1, tab2 = st.tabs(["Win Rate %", "Avg +30d Return %"])
+
+        with tab1:
+            fig_trend = go.Figure()
+            fig_trend.add_hline(y=50, line_dash="dash", line_color="gray",
+                                annotation_text="50% (coin flip)", annotation_position="bottom right")
+            for alert_tier, grp in agg.groupby("Alert"):
+                fig_trend.add_trace(go.Scatter(
+                    x=grp["date"], y=grp["win_rate_smooth"],
+                    name=alert_tier, mode="lines+markers",
+                    line=dict(color=color_map.get(alert_tier, "#aaa"), width=2),
+                    marker=dict(size=5),
+                    hovertemplate="%{x|%Y-%m-%d}<br>Win rate: %{y:.1f}%<extra>" + alert_tier + "</extra>",
+                ))
+            fig_trend.update_layout(
+                height=350, margin=dict(t=20, b=20),
+                yaxis_title="Win Rate %", yaxis_range=[0, 100],
+                legend=dict(orientation="h"),
+            )
+            st.plotly_chart(fig_trend, use_container_width=True)
+
+        with tab2:
+            fig_ret = go.Figure()
+            fig_ret.add_hline(y=0, line_dash="dash", line_color="gray")
+            for alert_tier, grp in agg.groupby("Alert"):
+                fig_ret.add_trace(go.Scatter(
+                    x=grp["date"], y=grp["avg_ret_smooth"],
+                    name=alert_tier, mode="lines+markers",
+                    line=dict(color=color_map.get(alert_tier, "#aaa"), width=2),
+                    marker=dict(size=5),
+                    hovertemplate="%{x|%Y-%m-%d}<br>Avg return: %{y:.1f}%<extra>" + alert_tier + "</extra>",
+                ))
+            fig_ret.update_layout(
+                height=350, margin=dict(t=20, b=20),
+                yaxis_title="Avg +30d Return %",
+                legend=dict(orientation="h"),
+            )
+            st.plotly_chart(fig_ret, use_container_width=True)
+
+        # Overall summary table
+        summary = (
+            trend.groupby("Alert")
+            .agg(
+                Screens=("date", "nunique"),
+                Total_Picks=("ret_30d", "count"),
+                Win_Rate=("ret_30d", lambda x: f"{(x>0).mean()*100:.1f}%"),
+                Avg_Return=("ret_30d", lambda x: f"{x.mean():+.1f}%"),
+                Median_Return=("ret_30d", lambda x: f"{x.median():+.1f}%"),
+                Best=("ret_30d", lambda x: f"{x.max():+.1f}%"),
+                Worst=("ret_30d", lambda x: f"{x.min():+.1f}%"),
+            )
+            .reset_index()
+            .rename(columns={"Alert":"Tier","Total_Picks":"Total Picks",
+                             "Win_Rate":"Win Rate","Avg_Return":"Avg +30d",
+                             "Median_Return":"Median +30d"})
+        )
+        st.dataframe(summary, use_container_width=True, hide_index=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -360,24 +700,75 @@ elif page == "📈 Stock Deep Dive":
               delta="NET BUY" if net_fgn_30>0 else "NET SELL",
               delta_color="normal" if net_fgn_30>0 else "inverse")
 
-    # Candlestick + volume
+    # Load screener flags for this ticker (full history, then filter to display range)
+    with st.spinner(f"Loading screener history for {ticker}..."):
+        flags_df = get_ticker_flags(df, ticker)
+
+    # Candlestick + screener flags
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
         x=g["DATE"], open=g["Open Price"],
         high=g["Tertinggi"], low=g["Terendah"], close=g["Penutupan"],
         name="Price", increasing_line_color="#00c853", decreasing_line_color="#ff1744",
     ))
+
+    if not flags_df.empty:
+        # Filter flags to the displayed date range
+        flags_in_range = flags_df[
+            (flags_df["DATE"] >= pd.Timestamp(d_from)) &
+            (flags_df["DATE"] <= pd.Timestamp(d_to))
+        ]
+        flag_styles = {
+            "🔴 STRONG": ("triangle-up",  "#e53935", 14),
+            "🟡 WATCH":  ("diamond",      "#ffc107", 12),
+            "⚪ RADAR":  ("circle",       "#90a4ae", 9),
+        }
+        for alert_tier, (symbol, color, size) in flag_styles.items():
+            subset = flags_in_range[flags_in_range["Alert"] == alert_tier]
+            if subset.empty:
+                continue
+            # Place marker slightly above the high for that candle
+            marker_y = []
+            for dt in subset["DATE"]:
+                candle = g[g["DATE"] == dt]
+                y_pos = candle["Tertinggi"].values[0] * 1.01 if not candle.empty else subset.loc[subset["DATE"]==dt, "Close"].values[0]
+                marker_y.append(y_pos)
+            fig.add_trace(go.Scatter(
+                x=subset["DATE"], y=marker_y,
+                mode="markers",
+                marker=dict(symbol=symbol, color=color, size=size,
+                            line=dict(color="white", width=1)),
+                name=alert_tier,
+                hovertemplate=(
+                    "%{x|%Y-%m-%d}<br>" + alert_tier +
+                    "<br>Vol Ratio: " + subset["Vol Ratio"].astype(str).values[0]
+                    if len(subset) == 1 else
+                    "%{x|%Y-%m-%d}<br>" + alert_tier
+                ) + "<extra></extra>",
+            ))
+
+    total_flags = len(flags_df) if not flags_df.empty else 0
     fig.update_layout(
-        title=f"{ticker} Price", height=420,
+        title=f"{ticker} Price  •  Screener flags: {total_flags} total in history "
+              f"({'▲ STRONG  ◆ WATCH  ● RADAR' if total_flags > 0 else 'none'})",
+        height=450,
         xaxis_rangeslider_visible=False,
-        margin=dict(t=40, b=10),
+        margin=dict(t=50, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # Volume bars
+    # Volume bars + 20-day avg line
     colors = ["#00c853" if p>=0 else "#ff1744" for p in g["pct_chg"]]
-    fig2 = go.Figure(go.Bar(x=g["DATE"], y=g["Volume"]/1e6, marker_color=colors, name="Volume (M)"))
-    fig2.update_layout(title="Volume (M lots)", height=200, margin=dict(t=40,b=10), yaxis_title="M lots")
+    vol_m = g["Volume"] / 1e6
+    avg20 = vol_m.rolling(20, min_periods=1).mean()
+    fig2 = go.Figure()
+    fig2.add_trace(go.Bar(x=g["DATE"], y=vol_m, marker_color=colors, name="Volume (M)", opacity=0.8))
+    fig2.add_trace(go.Scatter(x=g["DATE"], y=avg20, mode="lines",
+                              line=dict(color="#ff9800", width=1.5, dash="dot"),
+                              name="20d Avg Vol"))
+    fig2.update_layout(title="Volume (M lots)", height=200, margin=dict(t=40,b=10),
+                       yaxis_title="M lots", legend=dict(orientation="h"))
     st.plotly_chart(fig2, use_container_width=True)
 
     # Foreign flow
