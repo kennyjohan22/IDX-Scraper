@@ -170,6 +170,13 @@ def append_to_master(df: pd.DataFrame, target_date: str):
         if target_date in existing["DATE"].values:
             log(f"SKIP: {target_date} already in master.csv.")
             return
+        # Align to master schema — fill any missing columns with None so
+        # rows are never position-shifted when the IDX API drops a field.
+        master_cols = pd.read_csv(MASTER_CSV, nrows=0).columns.tolist()
+        for col in master_cols:
+            if col not in df_copy.columns:
+                df_copy[col] = None
+        df_copy = df_copy[master_cols]
         df_copy.to_csv(MASTER_CSV, mode="a", header=False, index=False)
         log(f"Appended {len(df_copy)} rows to master.csv for {target_date}.")
     else:

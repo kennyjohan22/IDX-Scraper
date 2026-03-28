@@ -70,6 +70,16 @@ def build_master(rebuild: bool = False):
 
         df.insert(0, "DATE", target_date)
 
+        # Align columns to the canonical master schema so appended rows are
+        # never shifted when a file is missing a column (e.g. 'Tanggal
+        # Perdagangan Terakhir' disappeared from the IDX API after mid-2025).
+        if os.path.exists(MASTER_CSV):
+            master_cols = pd.read_csv(MASTER_CSV, nrows=0).columns.tolist()
+            for col in master_cols:
+                if col not in df.columns:
+                    df[col] = None
+            df = df[master_cols]
+
         write_header = not os.path.exists(MASTER_CSV)
         df.to_csv(MASTER_CSV, mode="a", header=write_header, index=False)
         existing_dates.add(target_date)
