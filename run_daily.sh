@@ -8,5 +8,12 @@ LOG="$SCRIPT_DIR/scraper.log"
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] run_daily.sh triggered" >> "$LOG"
 cd "$SCRIPT_DIR"
+
+# 1. Fetch today's data
 "$PYTHON" scraper_browser.py >> "$LOG" 2>&1
+
+# 2. Run the pre-rocket screener
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Running screener..." >> "$LOG"
+"$PYTHON" screener.py >> "$LOG" 2>&1
+
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] run_daily.sh done" >> "$LOG"
