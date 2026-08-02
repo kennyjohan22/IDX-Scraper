@@ -19,6 +19,8 @@ import pandas as pd
 from datetime import datetime, date, timedelta
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
+from master_store import master_contains_date
+
 # ── Paths ─────────────────────────────────────────────────────────────────────
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 RAW_DIR    = os.path.join(BASE_DIR, "raw")
@@ -166,8 +168,7 @@ def append_to_master(df: pd.DataFrame, target_date: str):
     df_copy.insert(0, "DATE", target_date)
 
     if os.path.exists(MASTER_CSV):
-        existing = pd.read_csv(MASTER_CSV, usecols=["DATE"], nrows=10000)
-        if target_date in existing["DATE"].values:
+        if master_contains_date(MASTER_CSV, target_date):
             log(f"SKIP: {target_date} already in master.csv.")
             return
         # Align to master schema — fill any missing columns with None so
