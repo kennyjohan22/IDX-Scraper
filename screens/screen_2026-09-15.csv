@@ -1,0 +1,17 @@
+Kode Saham,Nama Perusahaan,Score,Alert,Close,Vol Ratio,Up-Vol Bias,Brk Prox%,PosRange%,Fgn+Days%,VolCV,OBV+,10d Chg%,Pre30 Chg%,Net Fgn (M sh),Avg Val/day (B),Why
+TUGU,Asuransi Tugu Pratama Indonesia Tbk.,92,STRONG,1455,1.74,4.75,98.6,88.0,60.0,0.6,YES,6.2,10.9,0.82,2.2,breakout-ready (99% of 20d high) · top of 52w range (88%) · foreign buying 60% of days · healthy volume (1.7x)
+CFIN,Clipan Finance Indonesia Tbk.,88,STRONG,376,2.26,5.78,98.9,91.0,60.0,0.83,YES,4.4,7.1,0.29,0.72,breakout-ready (99% of 20d high) · top of 52w range (91%) · foreign buying 60% of days · healthy volume (2.3x)
+LSIP,PP London Sumatra Indonesia Tbk.,83,STRONG,1685,2.21,6.38,95.7,84.0,70.0,0.73,YES,11.6,14.0,15.68,11.56,breakout-ready (96% of 20d high) · top of 52w range (84%) · foreign buying 70% of days · healthy volume (2.2x)
+AADI,Adaro Andalan Indonesia Tbk.,81,STRONG,12275,1.6,1.66,95.0,90.0,90.0,0.44,YES,12.9,20.2,44.2,90.59,near breakout (95%) · top of 52w range (90%) · foreign buying 90% of days · OBV uptrend
+BSSR,Baramulti Suksessarana Tbk.,81,STRONG,4900,1.79,1.59,97.5,90.0,50.0,0.56,YES,3.6,10.5,0.62,3.84,breakout-ready (98% of 20d high) · top of 52w range (90%) · healthy volume (1.8x) · OBV uptrend
+PTBA,Bukit Asam (Persero) Tbk.,78,STRONG,3020,3.91,3.29,94.4,81.0,90.0,0.46,YES,13.1,9.4,117.62,44.15,near breakout (94%) · top of 52w range (81%) · foreign buying 90% of days · OBV uptrend
+UVCR,Trimegah Karya Pratama Tbk.,74,STRONG,173,1.93,1.88,100.0,60.0,60.0,0.6,YES,23.6,-0.7,23.82,5.72,breakout-ready (100% of 20d high) · foreign buying 60% of days · healthy volume (1.9x) · OBV uptrend
+AKRA,AKR Corporindo Tbk.,66,STRONG,1490,1.5,2.02,95.5,80.0,30.0,0.58,YES,6.4,-0.7,-48.92,25.72,breakout-ready (96% of 20d high) · top of 52w range (80%) · OBV uptrend · strong accumulation (2.0x up/down)
+PKPK,Paragon Karya Perkasa Tbk.,65,STRONG,4200,2.43,3.09,87.7,86.0,70.0,1.07,YES,12.3,2.7,1.5,4.18,top of 52w range (86%) · foreign buying 70% of days · healthy volume (2.4x) · OBV uptrend
+SMDR,Samudera Indonesia  Tbk.,65,STRONG,390,4.31,5.49,95.6,62.0,60.0,0.67,YES,20.4,11.0,34.89,3.18,breakout-ready (96% of 20d high) · foreign buying 60% of days · OBV uptrend · strong accumulation (5.5x up/down)
+BNGA,Bank CIMB Niaga Tbk.,69,WATCH,1745,1.57,5.46,98.9,63.0,50.0,0.54,YES,3.3,4.3,-0.28,3.34,breakout-ready (99% of 20d high) · OBV uptrend · strong accumulation (5.5x up/down)
+NEST,Esta Indonesia Tbk.,69,WATCH,725,2.18,1.99,94.8,91.0,30.0,0.65,YES,-3.3,24.0,-2.35,3.1,near breakout (95%) · top of 52w range (91%) · healthy volume (2.2x) · OBV uptrend
+ERAL,Sinar Eka Selaras Tbk.,65,WATCH,328,2.46,2.04,97.0,57.0,70.0,0.7,no,7.9,7.0,0.75,1.44,breakout-ready (97% of 20d high) · foreign buying 70% of days · healthy volume (2.5x) · strong accumulation (2.0x up/down)
+ICON,Island Concepts Indonesia Tbk.,40,WATCH,144,3.32,2.08,81.4,76.0,50.0,1.12,YES,5.9,28.3,-11.59,4.98,top of 52w range (76%) · OBV uptrend · strong accumulation (2.1x up/down)
+ABMM,ABM Investama Tbk.,50,RADAR,2840,2.18,1.12,95.3,67.0,40.0,0.36,no,2.2,9.0,-0.13,1.05,breakout-ready (95% of 20d high) · healthy volume (2.2x) · sustained volume (no single spike)
+FORU,Fortune Indonesia Tbk,35,RADAR,4220,4.09,1.19,76.7,72.0,50.0,0.59,YES,59.8,0.0,0.03,3.51,OBV uptrend
